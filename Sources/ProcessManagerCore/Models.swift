@@ -108,16 +108,34 @@ public struct DockerPublishedContainer: Equatable, Hashable, Identifiable, Senda
 
     public let containerID: String
     public let name: String
+    public let image: String
+    public let status: String
     public let ports: String
 
-    public init(containerID: String, name: String, ports: String) {
+    public init(
+        containerID: String,
+        name: String,
+        image: String = "",
+        status: String = "",
+        ports: String
+    ) {
         self.containerID = containerID
         self.name = name
+        self.image = image
+        self.status = status
         self.ports = ports
     }
 
     public var shortID: String {
         String(containerID.prefix(12))
+    }
+
+    public var displayName: String {
+        name.isEmpty ? shortID : name
+    }
+
+    public var terminationTarget: ProcessTerminationTarget {
+        .dockerContainer(id: containerID, name: name)
     }
 }
 

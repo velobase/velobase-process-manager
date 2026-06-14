@@ -68,6 +68,17 @@ let dockerRange = ProcessScanner.parseDockerPublishedContainers(dockerPsOutput, 
 expect(dockerRange.count == 1, "docker parser should support published port ranges")
 expect(dockerRange[0].name == "api", "docker range parser should return matching container")
 
+let detailedDockerPsOutput = """
+abc123def456\tweb\tnginx:alpine\tUp 5 minutes\t0.0.0.0:3000->80/tcp
+bbbbccccdddd\tworker\tqueue:latest\tUp 2 hours\t
+"""
+
+let detailedDockerContainers = ProcessScanner.parseDockerPublishedContainers(detailedDockerPsOutput)
+expect(detailedDockerContainers.count == 2, "docker parser should support detailed ps format")
+expect(detailedDockerContainers[0].image == "nginx:alpine", "docker parser should preserve image")
+expect(detailedDockerContainers[0].status == "Up 5 minutes", "docker parser should preserve status")
+expect(detailedDockerContainers[1].ports.isEmpty, "docker parser should preserve empty ports")
+
 expect(
     ProcessScanner.isProtectedDockerHostCommand("/Applications/Docker.app/Contents/MacOS/com.docker.backend"),
     "docker backend should be recognized as protected"

@@ -32,7 +32,11 @@ public struct ProcessScanner: Sendable {
         self.runner = runner
     }
 
-    public func scanPorts(_ watches: [PortWatch], processSnapshots: [ProcessSnapshot]? = nil) -> [PortProcess] {
+    public func scanPorts(
+        _ watches: [PortWatch],
+        processSnapshots: [ProcessSnapshot]? = nil,
+        dockerContainers knownDockerContainers: [DockerPublishedContainer]? = nil
+    ) -> [PortProcess] {
         let watchedPorts = Set(watches.filter(\.enabled).map(\.port))
 
         guard !watchedPorts.isEmpty else {
@@ -71,7 +75,9 @@ public struct ProcessScanner: Sendable {
                 commandLine: commandLine
             )
         }
-        let dockerContainers = processes.contains(where: isDockerHostProcess) ? dockerPublishedContainers() : []
+        let dockerContainers = processes.contains(where: isDockerHostProcess)
+            ? (knownDockerContainers ?? dockerPublishedContainers())
+            : []
         let resolvedProcesses = Dictionary(grouping: processes, by: \.port)
             .flatMap { port, processes in
                 dockerAwarePortProcesses(processes, port: port, containers: dockerContainers)
@@ -114,6 +120,18 @@ public struct ProcessScanner: Sendable {
         }
 
         return matches.values.sorted { $0.process.pid < $1.process.pid }
+    }
+
+    public func scanDockerContainers() -> [DockerPublishedContainer] {
+        dockerPublishedContainers()
+            .sorted { lhs, rhs in
+                let lhsName = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+                if lhsName != .orderedSame {
+                    return lhsName == .orderedAscending
+                }
+
+                return lhs.shortID < rhs.shortID
+            }
     }
 
     public func terminate(pid: Int, force: Bool = false) throws {
@@ -198,21 +216,34 @@ public struct ProcessScanner: Sendable {
 
     public static func parseDockerPublishedContainers(_ output: String) -> [DockerPublishedContainer] {
         output.split(whereSeparator: \.isNewline).compactMap { rawLine in
-            let pieces = rawLine.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            let pieces = rawLine.split(separator: "\t", maxSplits: 4, omittingEmptySubsequences: false)
 
-            guard pieces.count == 3 else {
+            guard pieces.count == 3 || pieces.count == 5 else {
                 return nil
             }
 
             let containerID = String(pieces[0]).trimmingCharacters(in: .whitespacesAndNewlines)
             let name = String(pieces[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let ports = String(pieces[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let image = pieces.count == 5
+                ? String(pieces[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+                : ""
+            let status = pieces.count == 5
+                ? String(pieces[3]).trimmingCharacters(in: .whitespacesAndNewlines)
+                : ""
+            let portsIndex = pieces.count == 5 ? 4 : 2
+            let ports = String(pieces[portsIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
 
             guard !containerID.isEmpty else {
                 return nil
             }
 
-            return DockerPublishedContainer(containerID: containerID, name: name, ports: ports)
+            return DockerPublishedContainer(
+                containerID: containerID,
+                name: name,
+                image: image,
+                status: status,
+                ports: ports
+            )
         }
     }
 
@@ -448,7 +479,7 @@ public struct ProcessScanner: Sendable {
 
         guard let result = try? runner.run(
             docker,
-            arguments: ["ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Ports}}"]
+            arguments: ["ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]
         ), result.status == 0 else {
             return []
         }

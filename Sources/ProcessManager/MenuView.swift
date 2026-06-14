@@ -5,29 +5,9 @@ import SwiftUI
 struct MenuView: View {
     @EnvironmentObject private var monitor: ProcessMonitor
     @EnvironmentObject private var navigation: AppNavigation
-    @State private var showsIdlePorts = false
 
-    private var enabledPorts: [PortWatch] {
-        monitor.ports.filter(\.enabled)
-    }
-
-    private var activePortRows: [PortRowData] {
-        enabledPorts.compactMap { port in
-            let processes = monitor.processes(for: port.port)
-            guard !processes.isEmpty else {
-                return nil
-            }
-
-            return PortRowData(port: port, processes: processes)
-        }
-    }
-
-    private var idlePorts: [PortWatch] {
-        enabledPorts.filter { monitor.processes(for: $0.port).isEmpty }
-    }
-
-    private var enabledRules: [ProcessRule] {
-        monitor.rules.filter { $0.enabled && !$0.pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var detectedTargets: [DetectedTarget] {
+        DetectedTarget.build(monitor: monitor)
     }
 
     var body: some View {
@@ -63,22 +43,7 @@ struct MenuView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    SectionHeader(
-                        title: monitor.t(.portMonitoring),
-                        systemImage: "network",
-                        count: enabledPorts.count
-                    )
-
-                    portList
-
-                    SectionHeader(
-                        title: monitor.t(.activeRecognition),
-                        systemImage: "scope",
-                        count: monitor.ruleMatches.count
-                    )
-                    .padding(.top, 2)
-
-                    ruleList
+                    targetList
                 }
                 .padding(16)
             }
@@ -87,7 +52,7 @@ struct MenuView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.isScanning)
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.portProcesses)
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.ruleMatches)
-        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: showsIdlePorts)
+        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.dockerContainers)
     }
 
     private var statusHeader: some View {
@@ -129,8 +94,6 @@ struct MenuView: View {
 
             HStack(spacing: 8) {
                 MetricChip(value: "\(monitor.activeCount)", label: monitor.t(.processesTab), color: statusColor)
-                MetricChip(value: "\(enabledPorts.count)", label: monitor.t(.portsTab), color: .blue)
-                MetricChip(value: "\(enabledRules.count)", label: monitor.t(.activeRecognition), color: .purple)
             }
         }
         .padding(16)
@@ -181,37 +144,17 @@ struct MenuView: View {
     }
 
     @ViewBuilder
-    private var portList: some View {
-        if enabledPorts.isEmpty {
-            EmptyState(text: monitor.t(.noEnabledPorts), systemImage: "network.slash")
-                .transition(.opacity)
-        } else {
-            LazyVStack(spacing: 8) {
-                ForEach(activePortRows) { row in
-                    PortStatusRow(port: row.port, processes: row.processes)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                if !idlePorts.isEmpty {
-                    IdlePortsDisclosure(ports: idlePorts, isExpanded: $showsIdlePorts)
-                        .transition(.opacity)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var ruleList: some View {
+    private var targetList: some View {
         if !monitor.monitoringEnabled {
             EmptyState(text: monitor.t(.monitoringPaused), systemImage: "pause.circle")
                 .transition(.opacity)
-        } else if monitor.ruleMatches.isEmpty {
-            EmptyState(text: monitor.t(.noRuleMatches), systemImage: "checkmark.circle")
+        } else if detectedTargets.isEmpty {
+            EmptyState(text: monitor.t(.noTargetProcesses), systemImage: "checkmark.circle")
                 .transition(.opacity)
         } else {
             LazyVStack(spacing: 8) {
-                ForEach(monitor.ruleMatches) { match in
-                    RuleMatchRow(match: match)
+                ForEach(detectedTargets) { target in
+                    DetectedTargetRow(target: target)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -224,13 +167,6 @@ struct MenuView: View {
     }
 }
 
-private struct PortRowData: Identifiable {
-    let port: PortWatch
-    let processes: [PortProcess]
-
-    var id: PortWatch.ID { port.id }
-}
-
 private enum AppPalette {
     static let windowBackground = Color(nsColor: .windowBackgroundColor)
     static let headerBackground = Color(nsColor: .controlBackgroundColor).opacity(0.72)
@@ -241,62 +177,279 @@ private enum AppPalette {
     static let runningColor = Color.orange
 }
 
-private struct IdlePortsDisclosure: View {
+private enum TargetReasonKind: Int, Hashable {
+    case port
+    case rule
+    case docker
+
+    var systemImage: String {
+        switch self {
+        case .port:
+            "network"
+        case .rule:
+            "scope"
+        case .docker:
+            "shippingbox.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .port:
+            Color.orange
+        case .rule:
+            Color(red: 0.95, green: 0.46, blue: 0.08)
+        case .docker:
+            Color(red: 0.86, green: 0.39, blue: 0.10)
+        }
+    }
+}
+
+private struct TargetReason: Hashable, Identifiable {
+    let kind: TargetReasonKind
+    let text: String
+
+    var id: String {
+        "\(kind.rawValue)-\(text)"
+    }
+}
+
+private struct DetectedTarget: Equatable, Identifiable {
+    let id: String
+    var title: String
+    var subtitle: String
+    var identityLabel: String
+    var systemImage: String
+    var terminationTarget: ProcessTerminationTarget
+    var canTerminate: Bool
+    var showsSystemBadge: Bool
+    var reasons: [TargetReason]
+
+    var isDockerContainer: Bool {
+        terminationTarget.isDockerContainer
+    }
+
+    private var primaryReasonRank: Int {
+        reasons.map(\.kind.rawValue).min() ?? Int.max
+    }
+
+    private var primaryReasonText: String {
+        reasons.first { $0.kind.rawValue == primaryReasonRank }?.text ?? ""
+    }
+
+    mutating func addReason(_ reason: TargetReason) {
+        guard !reasons.contains(reason) else {
+            return
+        }
+
+        reasons.append(reason)
+        reasons.sort { lhs, rhs in
+            if lhs.kind.rawValue == rhs.kind.rawValue {
+                return lhs.text.localizedCaseInsensitiveCompare(rhs.text) == .orderedAscending
+            }
+
+            return lhs.kind.rawValue < rhs.kind.rawValue
+        }
+    }
+
+    @MainActor
+    static func build(monitor: ProcessMonitor) -> [DetectedTarget] {
+        var targets: [String: DetectedTarget] = [:]
+        var portLookup: [Int: PortWatch] = [:]
+
+        for port in monitor.ports where port.enabled {
+            portLookup[port.port] = port
+        }
+
+        for process in monitor.portProcesses {
+            merge(
+                DetectedTarget(
+                    id: process.terminationTarget.id,
+                    title: process.name,
+                    subtitle: process.commandLine,
+                    identityLabel: process.displayTarget,
+                    systemImage: process.isDockerContainer
+                        ? "shippingbox.fill"
+                        : (process.isProtectedSystemProcess ? "gearshape.2.fill" : "terminal"),
+                    terminationTarget: process.terminationTarget,
+                    canTerminate: process.canTerminate,
+                    showsSystemBadge: process.isProtectedSystemProcess,
+                    reasons: [portReason(port: process.port, watch: portLookup[process.port])]
+                ),
+                into: &targets
+            )
+        }
+
+        for match in monitor.ruleMatches {
+            let command = "\(match.process.executable) \(match.process.commandLine)"
+            let target = ruleTerminationTarget(match: match, command: command)
+
+            merge(
+                DetectedTarget(
+                    id: target.id,
+                    title: match.process.displayName,
+                    subtitle: match.process.commandLine,
+                    identityLabel: target.displayLabel,
+                    systemImage: target.isProtectedSystemProcess ? "gearshape.2.fill" : "terminal",
+                    terminationTarget: target,
+                    canTerminate: target.canTerminate,
+                    showsSystemBadge: target.isProtectedSystemProcess,
+                    reasons: match.rules.map { TargetReason(kind: .rule, text: $0) }
+                ),
+                into: &targets
+            )
+        }
+
+        for container in monitor.dockerContainers {
+            let target = container.terminationTarget
+
+            merge(
+                DetectedTarget(
+                    id: target.id,
+                    title: container.displayName,
+                    subtitle: dockerSubtitle(container, monitor: monitor),
+                    identityLabel: target.displayLabel,
+                    systemImage: "shippingbox.fill",
+                    terminationTarget: target,
+                    canTerminate: target.canTerminate,
+                    showsSystemBadge: false,
+                    reasons: [TargetReason(kind: .docker, text: "Docker")]
+                ),
+                into: &targets
+            )
+        }
+
+        return targets.values.sorted { lhs, rhs in
+            if lhs.primaryReasonRank != rhs.primaryReasonRank {
+                return lhs.primaryReasonRank < rhs.primaryReasonRank
+            }
+
+            let reasonOrder = lhs.primaryReasonText.localizedCaseInsensitiveCompare(rhs.primaryReasonText)
+            if reasonOrder != .orderedSame {
+                return reasonOrder == .orderedAscending
+            }
+
+            let titleOrder = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+            if titleOrder != .orderedSame {
+                return titleOrder == .orderedAscending
+            }
+
+            return lhs.id < rhs.id
+        }
+    }
+
+    private static func merge(_ target: DetectedTarget, into targets: inout [String: DetectedTarget]) {
+        guard var existing = targets[target.id] else {
+            targets[target.id] = target
+            return
+        }
+
+        for reason in target.reasons {
+            existing.addReason(reason)
+        }
+
+        if existing.subtitle.isEmpty || existing.subtitle == existing.title {
+            existing.subtitle = target.subtitle
+        }
+
+        if existing.identityLabel.isEmpty {
+            existing.identityLabel = target.identityLabel
+        }
+
+        if existing.systemImage == "terminal", target.systemImage != "terminal" {
+            existing.systemImage = target.systemImage
+        }
+
+        existing.canTerminate = existing.canTerminate || target.canTerminate
+        existing.showsSystemBadge = existing.showsSystemBadge || target.showsSystemBadge
+        targets[target.id] = existing
+    }
+
+    private static func portReason(port: Int, watch: PortWatch?) -> TargetReason {
+        let label = watch?.label.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = label.isEmpty ? ":\(port)" : "\(label) :\(port)"
+        return TargetReason(kind: .port, text: text)
+    }
+
+    private static func ruleTerminationTarget(match: RuleProcessMatch, command: String) -> ProcessTerminationTarget {
+        if ProcessScanner.isProtectedSystemProcessCommand(command) {
+            return .protectedSystemProcess(pid: match.process.pid, name: match.process.displayName)
+        }
+
+        if ProcessScanner.isProtectedDockerHostCommand(command) {
+            return .protectedDockerHost(pid: match.process.pid)
+        }
+
+        return .process(pid: match.process.pid)
+    }
+
+    @MainActor
+    private static func dockerSubtitle(_ container: DockerPublishedContainer, monitor: ProcessMonitor) -> String {
+        var pieces: [String] = []
+
+        if !container.image.isEmpty {
+            pieces.append(container.image)
+        }
+
+        pieces.append(container.ports.isEmpty ? monitor.t(.noPublishedPorts) : container.ports)
+
+        if !container.status.isEmpty {
+            pieces.append(container.status)
+        }
+
+        return pieces.joined(separator: " · ")
+    }
+}
+
+private struct DetectedTargetRow: View {
     @EnvironmentObject private var monitor: ProcessMonitor
-    let ports: [PortWatch]
-    @Binding var isExpanded: Bool
+    let target: DetectedTarget
 
     var body: some View {
-        VStack(spacing: 8) {
-            Button {
-                isExpanded.toggle()
-            } label: {
-                HStack(spacing: 10) {
-                    StatusDot(color: AppPalette.idleColor)
+        ProcessRow(
+            title: target.title,
+            subtitle: target.subtitle,
+            trailing: target.identityLabel,
+            reasons: target.reasons,
+            systemImage: target.systemImage,
+            canTerminate: target.canTerminate,
+            actionMode: monitor.terminationButtonMode(for: target.terminationTarget),
+            terminateLabel: target.isDockerContainer ? monitor.t(.stopContainer) : monitor.t(.sendTerm),
+            forceTerminateLabel: target.isDockerContainer ? monitor.t(.killContainer) : monitor.t(.forceKill),
+            disabledHelp: target.showsSystemBadge ? monitor.t(.systemProcessProtected) : monitor.t(.dockerProxyProtected),
+            showsSystemBadge: target.showsSystemBadge,
+            terminate: { monitor.terminate(target.terminationTarget) },
+            forceTerminate: { monitor.terminate(target.terminationTarget, force: true) }
+        )
+        .padding(11)
+        .background(AppPalette.rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(AppPalette.rowBorder, lineWidth: 1)
+        }
+    }
+}
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(monitor.t(.idlePorts))
-                            .font(.subheadline.weight(.semibold))
+private struct ReasonChip: View {
+    let reason: TargetReason
 
-                        Text(isExpanded ? monitor.t(.collapseIdlePorts) : monitor.t(.expandIdlePorts))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: reason.kind.systemImage)
+                .font(.system(size: 9, weight: .semibold))
 
-                    Spacer()
-
-                    Text("\(ports.count)")
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(AppPalette.insetBackground, in: Capsule())
-
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                }
-                .padding(11)
-                .contentShape(Rectangle())
-                .background(AppPalette.rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(AppPalette.rowBorder, lineWidth: 1)
-                }
-            }
-            .buttonStyle(.plain)
-            .help(isExpanded ? monitor.t(.collapseIdlePorts) : monitor.t(.expandIdlePorts))
-
-            if isExpanded {
-                LazyVStack(spacing: 8) {
-                    ForEach(ports) { port in
-                        PortStatusRow(port: port, processes: [])
-                    }
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            Text(reason.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(reason.kind.tint)
+        .padding(.horizontal, 7)
+        .frame(height: 21)
+        .background(reason.kind.tint.opacity(0.11), in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(reason.kind.tint.opacity(0.18), lineWidth: 1)
         }
     }
 }
@@ -409,156 +562,12 @@ private struct ToolbarIconButtonStyle: ButtonStyle {
     }
 }
 
-private struct SectionHeader: View {
-    let title: String
-    let systemImage: String
-    let count: Int
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-
-            Text("\(count)")
-                .font(.caption2.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(AppPalette.insetBackground, in: Capsule())
-
-            Spacer()
-        }
-    }
-}
-
-private struct PortStatusRow: View {
-    @EnvironmentObject private var monitor: ProcessMonitor
-    let port: PortWatch
-    let processes: [PortProcess]
-
-    private var rowColor: Color {
-        processes.isEmpty ? AppPalette.idleColor : AppPalette.runningColor
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 10) {
-                StatusDot(color: rowColor)
-
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text(verbatim: port.displayName)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Text(verbatim: ":\(port.port)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                }
-
-                Spacer()
-
-                if processes.isEmpty {
-                    Text(monitor.t(.idle))
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(AppPalette.insetBackground, in: Capsule())
-                        .transition(.opacity)
-                }
-            }
-
-            if !processes.isEmpty {
-                VStack(spacing: 7) {
-                    ForEach(processes) { process in
-                        ProcessRow(
-                            title: process.name,
-                            subtitle: process.commandLine,
-                            trailing: process.displayTarget,
-                            systemImage: process.isDockerContainer
-                                ? "shippingbox.fill"
-                                : (process.isProtectedSystemProcess ? "gearshape.2.fill" : "terminal"),
-                            canTerminate: process.canTerminate,
-                            actionMode: monitor.terminationButtonMode(for: process.terminationTarget),
-                            terminateLabel: process.isDockerContainer ? monitor.t(.stopContainer) : monitor.t(.sendTerm),
-                            forceTerminateLabel: process.isDockerContainer ? monitor.t(.killContainer) : monitor.t(.forceKill),
-                            disabledHelp: process.isProtectedSystemProcess ? monitor.t(.systemProcessProtected) : monitor.t(.dockerProxyProtected),
-                            showsSystemBadge: process.isProtectedSystemProcess,
-                            terminate: { monitor.terminate(process.terminationTarget) },
-                            forceTerminate: { monitor.terminate(process.terminationTarget, force: true) }
-                        )
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-                }
-            }
-        }
-        .padding(11)
-        .background(AppPalette.rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(AppPalette.rowBorder, lineWidth: 1)
-        }
-    }
-}
-
-private struct StatusDot: View {
-    let color: Color
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(color)
-                .frame(width: 9, height: 9)
-        }
-        .frame(width: 22, height: 22)
-    }
-}
-
-private struct RuleMatchRow: View {
-    @EnvironmentObject private var monitor: ProcessMonitor
-    let match: RuleProcessMatch
-
-    private var target: ProcessTerminationTarget {
-        .process(pid: match.process.pid)
-    }
-
-    var body: some View {
-        ProcessRow(
-            title: match.process.displayName,
-            subtitle: match.process.commandLine,
-            trailing: match.rules.joined(separator: ", "),
-            systemImage: "terminal",
-            canTerminate: true,
-            actionMode: monitor.terminationButtonMode(for: target),
-            terminateLabel: monitor.t(.sendTerm),
-            forceTerminateLabel: monitor.t(.forceKill),
-            disabledHelp: monitor.t(.dockerProxyProtected),
-            showsSystemBadge: false,
-            terminate: { monitor.terminate(target) },
-            forceTerminate: { monitor.terminate(target, force: true) }
-        )
-        .padding(11)
-        .background(AppPalette.rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(AppPalette.rowBorder, lineWidth: 1)
-        }
-    }
-}
-
 private struct ProcessRow: View {
     @EnvironmentObject private var monitor: ProcessMonitor
     let title: String
     let subtitle: String
     let trailing: String
+    var reasons: [TargetReason] = []
     let systemImage: String
     let canTerminate: Bool
     let actionMode: ProcessTerminationButtonMode
@@ -604,6 +613,10 @@ private struct ProcessRow: View {
         }
     }
 
+    private var visibleReasons: [TargetReason] {
+        Array(reasons.prefix(4))
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             HStack(alignment: .top, spacing: 10) {
@@ -620,12 +633,32 @@ private struct ProcessRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
 
-                        Text(trailing)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        if !trailing.isEmpty {
+                            Text(trailing)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
 
                         Spacer(minLength: 28)
+                    }
+
+                    if !reasons.isEmpty {
+                        HStack(spacing: 5) {
+                            ForEach(visibleReasons) { reason in
+                                ReasonChip(reason: reason)
+                            }
+
+                            if reasons.count > visibleReasons.count {
+                                Text("+\(reasons.count - visibleReasons.count)")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 7)
+                                    .frame(height: 21)
+                                    .background(AppPalette.insetBackground, in: Capsule())
+                            }
+                        }
+                        .padding(.trailing, 28)
                     }
 
                     Text(subtitle.isEmpty ? title : subtitle)

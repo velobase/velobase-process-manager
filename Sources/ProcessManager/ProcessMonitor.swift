@@ -52,6 +52,7 @@ final class ProcessMonitor: ObservableObject {
 
     @Published private(set) var portProcesses: [PortProcess] = []
     @Published private(set) var ruleMatches: [RuleProcessMatch] = []
+    @Published private(set) var dockerContainers: [DockerPublishedContainer] = []
     @Published private(set) var lastScanDate: Date?
     @Published private(set) var statusMessage = ""
     @Published private(set) var isScanning = false
@@ -84,7 +85,7 @@ final class ProcessMonitor: ObservableObject {
     }
 
     var activeCount: Int {
-        Set(countablePortTargetIDs + countableRuleTargetIDs).count
+        Set(countablePortTargetIDs + countableRuleTargetIDs + countableDockerTargetIDs).count
     }
 
     var statusSymbol: String {
@@ -151,7 +152,12 @@ final class ProcessMonitor: ObservableObject {
         scanTask?.cancel()
         scanTask = Task.detached(priority: .utility) {
             let processSnapshots = scanner.listProcesses()
-            let portProcesses = scanner.scanPorts(ports, processSnapshots: processSnapshots)
+            let dockerContainers = scanner.scanDockerContainers()
+            let portProcesses = scanner.scanPorts(
+                ports,
+                processSnapshots: processSnapshots,
+                dockerContainers: dockerContainers
+            )
             let ruleMatches = scanner.scanRules(rules, processSnapshots: processSnapshots)
 
             await MainActor.run {
@@ -161,7 +167,12 @@ final class ProcessMonitor: ObservableObject {
 
                 self.portProcesses = portProcesses
                 self.ruleMatches = ruleMatches
-                self.reconcileTerminationButtons(portProcesses: portProcesses, ruleMatches: ruleMatches)
+                self.dockerContainers = dockerContainers
+                self.reconcileTerminationButtons(
+                    portProcesses: portProcesses,
+                    ruleMatches: ruleMatches,
+                    dockerContainers: dockerContainers
+                )
                 self.lastScanDate = Date()
                 self.errorMessage = nil
                 self.isScanning = false
@@ -258,10 +269,6 @@ final class ProcessMonitor: ObservableObject {
         scanNow()
     }
 
-    func processes(for port: Int) -> [PortProcess] {
-        portProcesses.filter { $0.port == port }
-    }
-
     private var countablePortTargetIDs: [String] {
         portProcesses
             .filter { !$0.isProtectedSystemProcess }
@@ -278,12 +285,19 @@ final class ProcessMonitor: ObservableObject {
             .map { "pid-\($0.process.pid)" }
     }
 
+    private var countableDockerTargetIDs: [String] {
+        dockerContainers.map(\.terminationTarget.id)
+    }
+
     private func reconcileTerminationButtons(
         portProcesses: [PortProcess],
-        ruleMatches: [RuleProcessMatch]
+        ruleMatches: [RuleProcessMatch],
+        dockerContainers: [DockerPublishedContainer]
     ) {
         let activeTargetIDs = Set(
-            portProcesses.map(\.terminationTarget.id) + ruleMatches.map { "pid-\($0.process.pid)" }
+            portProcesses.map(\.terminationTarget.id)
+                + ruleMatches.map { "pid-\($0.process.pid)" }
+                + dockerContainers.map(\.terminationTarget.id)
         )
         let stillRunningAfterGracefulStop = pendingGracefulTargets.intersection(activeTargetIDs)
 

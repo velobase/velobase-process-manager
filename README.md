@@ -27,9 +27,9 @@ DevMinder was made for that small but annoying moment. It lives in the menu bar,
 - Sleep mode: pause or resume monitoring from the menu bar.
 - Low overhead scanning: defaults to a 30-second interval and batches port checks to avoid repeatedly spawning heavy commands.
 - Safe stopping flow: send `TERM` first, then offer `KILL` only if the process does not exit.
-- Docker-aware stopping: mapped Docker Desktop ports resolve to containers and use `docker stop` / `docker kill` instead of terminating Docker backend processes.
+- Docker scan: running Docker containers are listed even when they do not match a watched port or process rule; mapped Docker Desktop ports still resolve to containers and use `docker stop` / `docker kill`.
 - System process protection: Apple system processes are marked as protected and cannot be stopped from the app.
-- Collapsible idle ports: running ports stay visible while idle ports can stay tucked away.
+- Unified target list: detected targets are shown in one list with subtle reason tags for port, rule, and Docker matches.
 - Localization and appearance: follows system language and appearance, with Chinese/English and light/dark modes available in settings.
 
 ## Install
@@ -42,12 +42,12 @@ This free distribution build is not notarized with an Apple Developer ID. If mac
 
 ## Usage
 
-- Click the menu bar icon to view matched port processes and rule matches.
+- Click the menu bar icon to view detected targets grouped by port, rule, and Docker reason tags.
 - Click refresh to scan immediately.
 - Click pause to enter sleep mode and stop the background timer.
 - Click the close button on a process row to send `TERM`.
 - If the process does not exit, the button changes to a force-stop action.
-- Docker rows show the resolved container name and stop the container directly.
+- Docker rows show the container name, image, status, and published ports when available.
 - Apple system processes show a protected system badge instead of a stop button.
 
 ## Development
