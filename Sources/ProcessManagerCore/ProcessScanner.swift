@@ -149,8 +149,7 @@ public struct ProcessScanner: Sendable {
                 throw ProcessScannerError.systemProcessProtected(pid: pid)
             }
 
-            let signal = force ? "-KILL" : "-TERM"
-            _ = try runChecked("/bin/kill", arguments: [signal, "\(pid)"])
+            try sendSignal(pid: pid, force: force)
         case .dockerContainer(let id, _):
             guard let docker = dockerExecutable() else {
                 throw ProcessScannerError.dockerCLIUnavailable
@@ -162,6 +161,8 @@ public struct ProcessScanner: Sendable {
             throw ProcessScannerError.dockerHostProtected(pid: pid)
         case .protectedSystemProcess(let pid, _):
             throw ProcessScannerError.systemProcessProtected(pid: pid)
+        case .systemProcessOverride(let pid, _):
+            try sendSignal(pid: pid, force: force)
         }
     }
 
@@ -515,6 +516,11 @@ public struct ProcessScanner: Sendable {
         }
 
         return result
+    }
+
+    private func sendSignal(pid: Int, force: Bool) throws {
+        let signal = force ? "-KILL" : "-TERM"
+        _ = try runChecked("/bin/kill", arguments: [signal, "\(pid)"])
     }
 
     private func isDockerHostProcess(_ process: PortProcess) -> Bool {

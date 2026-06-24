@@ -27,7 +27,7 @@ struct MenuView: View {
         .background(AppPalette.windowBackground)
         .frame(minWidth: 520, idealWidth: 540, maxWidth: .infinity, minHeight: 560, idealHeight: 680, maxHeight: .infinity)
         .preferredColorScheme(monitor.appearanceMode.colorScheme)
-        .animation(.spring(response: 0.30, dampingFraction: 0.90), value: navigation.screen)
+        .animation(AppMotion.page, value: navigation.screen)
     }
 
     private var dashboard: some View {
@@ -48,11 +48,11 @@ struct MenuView: View {
                 .padding(16)
             }
         }
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.activeCount)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.isScanning)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.portProcesses)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.ruleMatches)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: monitor.dockerContainers)
+        .animation(AppMotion.content, value: monitor.activeCount)
+        .animation(AppMotion.content, value: monitor.isScanning)
+        .animation(AppMotion.content, value: monitor.portProcesses)
+        .animation(AppMotion.content, value: monitor.ruleMatches)
+        .animation(AppMotion.content, value: monitor.dockerContainers)
     }
 
     private var statusHeader: some View {
@@ -175,6 +175,12 @@ private enum AppPalette {
     static let insetBackground = Color(nsColor: .textBackgroundColor).opacity(0.42)
     static let idleColor = Color(nsColor: .secondaryLabelColor)
     static let runningColor = Color.orange
+}
+
+private enum AppMotion {
+    static let page = Animation.spring(response: 0.30, dampingFraction: 0.92, blendDuration: 0.10)
+    static let content = Animation.spring(response: 0.28, dampingFraction: 0.93, blendDuration: 0.12)
+    static let control = Animation.spring(response: 0.20, dampingFraction: 0.86, blendDuration: 0.08)
 }
 
 private enum TargetReasonKind: Int, Hashable {
@@ -404,6 +410,26 @@ private struct DetectedTarget: Equatable, Identifiable {
 private struct DetectedTargetRow: View {
     @EnvironmentObject private var monitor: ProcessMonitor
     let target: DetectedTarget
+    @State private var revealsSystemAction = false
+
+    private var actionTarget: ProcessTerminationTarget {
+        guard
+            revealsSystemAction,
+            let overrideTarget = target.terminationTarget.systemOverrideTarget
+        else {
+            return target.terminationTarget
+        }
+
+        return overrideTarget
+    }
+
+    private var showsSystemBadge: Bool {
+        target.showsSystemBadge && !revealsSystemAction
+    }
+
+    private var canTerminate: Bool {
+        target.canTerminate || actionTarget.canTerminate
+    }
 
     var body: some View {
         ProcessRow(
@@ -412,20 +438,36 @@ private struct DetectedTargetRow: View {
             trailing: target.identityLabel,
             reasons: target.reasons,
             systemImage: target.systemImage,
-            canTerminate: target.canTerminate,
-            actionMode: monitor.terminationButtonMode(for: target.terminationTarget),
+            canTerminate: canTerminate,
+            actionMode: monitor.terminationButtonMode(for: actionTarget),
             terminateLabel: target.isDockerContainer ? monitor.t(.stopContainer) : monitor.t(.sendTerm),
             forceTerminateLabel: target.isDockerContainer ? monitor.t(.killContainer) : monitor.t(.forceKill),
             disabledHelp: target.showsSystemBadge ? monitor.t(.systemProcessProtected) : monitor.t(.dockerProxyProtected),
-            showsSystemBadge: target.showsSystemBadge,
-            terminate: { monitor.terminate(target.terminationTarget) },
-            forceTerminate: { monitor.terminate(target.terminationTarget, force: true) }
+            showsSystemBadge: showsSystemBadge,
+            systemBadgeHelp: monitor.t(.systemProcessRevealHelp),
+            revealSystemAction: {
+                withAnimation(AppMotion.content) {
+                    revealsSystemAction = true
+                }
+            },
+            terminate: { monitor.terminate(actionTarget) },
+            forceTerminate: { monitor.terminate(actionTarget, force: true) }
         )
         .padding(11)
         .background(AppPalette.rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(AppPalette.rowBorder, lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onHover { isHovering in
+            guard !isHovering, revealsSystemAction else {
+                return
+            }
+
+            withAnimation(AppMotion.content) {
+                revealsSystemAction = false
+            }
         }
     }
 }
@@ -558,7 +600,22 @@ private struct ToolbarIconButtonStyle: ButtonStyle {
                     .stroke(tint.opacity(configuration.isPressed ? 0.28 : 0.12), lineWidth: 1)
             }
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .animation(.spring(response: 0.2, dampingFraction: 0.72), value: configuration.isPressed)
+            .animation(AppMotion.control, value: configuration.isPressed)
+    }
+}
+
+private struct RowIconButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(tint)
+            .background(
+                Circle()
+                    .fill(configuration.isPressed ? tint.opacity(0.12) : Color.clear)
+            )
+            .scaleEffect(configuration.isPressed ? 0.90 : 1)
+            .animation(AppMotion.control, value: configuration.isPressed)
     }
 }
 
@@ -575,6 +632,8 @@ private struct ProcessRow: View {
     let forceTerminateLabel: String
     let disabledHelp: String
     let showsSystemBadge: Bool
+    let systemBadgeHelp: String
+    let revealSystemAction: (() -> Void)?
     let terminate: () -> Void
     let forceTerminate: () -> Void
 
@@ -672,26 +731,41 @@ private struct ProcessRow: View {
             }
 
             if showsSystemBadge {
-                SystemProcessBadge(text: monitor.t(.systemProcessBadge))
-                    .help(buttonHelp)
+                Button {
+                    revealSystemAction?()
+                } label: {
+                    SystemProcessBadge(text: monitor.t(.systemProcessBadge), isInteractive: revealSystemAction != nil)
+                }
+                .buttonStyle(.plain)
+                .help(systemBadgeHelp)
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.94, anchor: .trailing).combined(with: .opacity),
+                    removal: .scale(scale: 0.98, anchor: .trailing).combined(with: .opacity)
+                ))
             } else {
                 Button(action: actionMode == .force ? forceTerminate : terminate) {
                     Image(systemName: buttonIcon)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(buttonColor)
                         .frame(width: 26, height: 26)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(RowIconButtonStyle(tint: buttonColor))
                 .disabled(!canTerminate || actionMode == .waiting)
                 .opacity((canTerminate && actionMode != .waiting) ? 1 : 0.42)
                 .help(buttonHelp)
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.82, anchor: .trailing).combined(with: .opacity),
+                    removal: .scale(scale: 0.92, anchor: .trailing).combined(with: .opacity)
+                ))
             }
         }
+        .animation(AppMotion.content, value: showsSystemBadge)
+        .animation(AppMotion.control, value: actionMode)
     }
 }
 
 private struct SystemProcessBadge: View {
     let text: String
+    let isInteractive: Bool
 
     var body: some View {
         HStack(spacing: 4) {
@@ -701,11 +775,18 @@ private struct SystemProcessBadge: View {
             Text(text)
                 .font(.caption2.weight(.semibold))
                 .lineLimit(1)
+
+            if isInteractive {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.72)
+            }
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 7)
         .frame(height: 24)
         .background(AppPalette.insetBackground, in: Capsule())
+        .contentShape(Capsule())
     }
 }
 

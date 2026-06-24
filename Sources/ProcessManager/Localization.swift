@@ -30,6 +30,7 @@ enum L10nKey: Hashable {
     case dockerProxyProtected
     case systemProcessProtected
     case systemProcessBadge
+    case systemProcessRevealHelp
     case noPublishedPorts
     case terminateProcess
     case ready
@@ -143,6 +144,7 @@ enum L10n {
         .dockerProxyProtected: "这是 Docker Desktop 端口代理，不能直接终止。",
         .systemProcessProtected: "这是 Apple 系统进程，不能直接终止。",
         .systemProcessBadge: "系统",
+        .systemProcessRevealHelp: "可能是误判，点击显示停止按钮。",
         .noPublishedPorts: "未暴露端口",
         .terminateProcess: "终止进程",
         .ready: "准备就绪",
@@ -198,6 +200,7 @@ enum L10n {
         .dockerProxyProtected: "This is a Docker Desktop port proxy and cannot be terminated directly.",
         .systemProcessProtected: "This is an Apple system process and cannot be terminated directly.",
         .systemProcessBadge: "System",
+        .systemProcessRevealHelp: "This may be a false positive. Click to show the stop button.",
         .noPublishedPorts: "No published ports",
         .terminateProcess: "Terminate process",
         .ready: "Ready",

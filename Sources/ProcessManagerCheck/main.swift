@@ -87,6 +87,10 @@ expect(
     ProcessScanner.isProtectedSystemProcessCommand("/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"),
     "Control Center should be recognized as a protected system process"
 )
+let protectedSystemTarget = ProcessTerminationTarget.protectedSystemProcess(pid: 1070, name: "ControlCenter")
+let overrideSystemTarget = protectedSystemTarget.systemOverrideTarget
+expect(overrideSystemTarget?.id == protectedSystemTarget.id, "system override should keep target identity stable")
+expect(overrideSystemTarget?.canTerminate == true, "system override should be terminable after user unlock")
 expect(
     !ProcessScanner.isProtectedSystemProcessCommand("/opt/homebrew/bin/flask --app server run --port 5000"),
     "user development processes on port 5000 should remain terminable"
